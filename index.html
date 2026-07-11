@@ -157,15 +157,30 @@ $("file").onchange = e => {
 // frendyrachman/mlbb-ai-auto-clipper — YOLOv8n fine-tuned on MLBB gameplay
 // (kills/savages/etc). We upload the video, the Space detects + cuts, and we
 // unpack the returned highlights.zip right here on the phone.
-const SPACE = "frendyrachman/mlbb-ai-auto-clipper";
+// Lukas's own Space first; the original public Space is the fallback until
+// (or in case) his duplicate is down. Both run the same YOLOv8 MLBB model.
+const HOSTS = [
+  { host: "https://bewox11-mlbb-clipper.hf.space", label: "your MLBB AI Space" },
+  { host: "https://frendyrachman-mlbb-ai-auto-clipper.hf.space", label: "the public MLBB AI Space" },
+];
+async function pickHost() {
+  for (const h of HOSTS) {
+    try {
+      const r = await fetch(h.host + "/config", { method: "HEAD" });
+      if (r.ok) return h;
+    } catch { /* not up — try the next */ }
+  }
+  throw new Error("no MLBB AI Space is reachable right now");
+}
 async function yoloProcess(file) {
   $("clips").innerHTML = ""; $("top").style.display = "none";
   fileName = (file.name || "match").replace(/\.[^.]+$/, "");
   const mb = (file.size / 1048576).toFixed(0);
-  setStat(`Uploading ${mb}MB to the MLBB AI Space… (free 2-vCPU hardware — a long match can take a while)`);
   setBar(0.02);
-  const HOST = "https://frendyrachman-mlbb-ai-auto-clipper.hf.space";
   try {
+    const picked = await pickHost();
+    const HOST = picked.host;
+    setStat(`Uploading ${mb}MB to ${picked.label}… (a long match can take a while)`);
     // raw gradio REST API with plain (uncredentialed) fetches — the official
     // JS client sends credentialed requests this Space's CORS doesn't allow
     const fd = new FormData(); fd.append("files", file, file.name || "match.mp4");
