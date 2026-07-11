@@ -166,7 +166,7 @@ const HOSTS = [
 async function pickHost() {
   for (const h of HOSTS) {
     try {
-      const r = await fetch(h.host + "/config", { method: "HEAD" });
+      const r = await fetch(h.host + "/config"); // gradio rejects HEAD — plain GET
       if (r.ok) return h;
     } catch { /* not up — try the next */ }
   }
