@@ -164,7 +164,10 @@ const HOSTS = [
   { host: "https://frendyrachman-mlbb-ai-auto-clipper.hf.space", label: "the public MLBB AI Space" },
 ];
 async function pickHost() {
-  for (const h of HOSTS) {
+  // ZeroGPU (Lukas's Space) requires an HF token for cross-origin callers —
+  // without one, route straight to the public CPU Space instead of failing
+  const order = $("hfTok").value.trim() ? HOSTS : [...HOSTS].reverse();
+  for (const h of order) {
     try {
       const r = await fetch(h.host + "/config"); // gradio rejects HEAD — plain GET
       if (r.ok) return h;
@@ -214,7 +217,7 @@ async function yoloProcess(file) {
         const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
         const ev = (chunk.match(/^event:\s*(\S+)/m) || [])[1];
         const dat = (chunk.match(/^data:\s*(.+)/m) || [])[1];
-        if (ev === "error") throw new Error(dat || "Space error");
+        if (ev === "error") throw new Error(dat && dat !== "null" ? dat : "the Space refused the job (ZeroGPU needs your HF token — add it in ⚙️ Settings)");
         if (ev === "complete" && dat) result = JSON.parse(dat);
         if (ev === "heartbeat") setStat("Still working… (free hardware, long matches take minutes)");
       }
