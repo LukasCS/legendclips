@@ -49,6 +49,13 @@
     background:#0f151d;color:var(--text);font:14px monospace}
   .ios-tip{margin-top:16px;background:#12202e;border:1px solid #1e3a52;color:#a0d8ff;border-radius:12px;
     padding:10px 14px;font-size:13.5px;display:none}
+  .engines{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+  @media(max-width:560px){.engines{grid-template-columns:1fr}}
+  .eng{display:block;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;cursor:pointer;font-size:14px}
+  .eng span{display:block;color:var(--dim);font-size:12.5px;margin-top:2px}
+  .eng:has(input:checked){border-color:var(--acc)}
+  .eng input{margin-right:6px}
+  .clip video{width:100%;border-radius:8px;margin-top:8px;background:#000}
   .foot{margin-top:40px;color:var(--dim);font-size:12.5px;text-align:center}
   #exportOverlay{position:fixed;inset:0;background:#000000dd;display:none;place-items:center;z-index:9;text-align:center;padding:20px}
   #exportOverlay .box{max-width:420px}
@@ -61,6 +68,13 @@
   <h1>⚔️ Legend<span class="l">Clips</span></h1>
   <div class="sub">MLBB highlight cutter — pick a full match recording, get the best moments as clips.
     <b>Everything runs on your device.</b> Nothing is uploaded.</div>
+
+  <div class="engines" id="engines">
+    <label class="eng"><input type="radio" name="eng" value="local" checked>
+      <b>⚡ On-device</b><span>fast · private · heuristic detector</span></label>
+    <label class="eng"><input type="radio" name="eng" value="yolo">
+      <b>🤖 YOLO AI</b><span>MLBB-trained model on a Hugging Face Space — uploads your video, returns finished clips</span></label>
+  </div>
 
   <label class="drop" id="drop">
     <div>🎬 <b>Tap to choose your match recording</b></div>
@@ -86,8 +100,9 @@
       <input type="range" id="nClips" min="3" max="12" value="6"></label>
     <label>Clip length: <b id="clipLenV">12</b>s
       <input type="range" id="clipLen" min="6" max="20" value="12"></label>
-    <label>Hugging Face token (optional — AI describes &amp; re-ranks your moments; stays in this browser only)
+    <label>Hugging Face token (optional — AI captions/re-ranks moments + powers the voiceover; stays in this browser only)
       <input type="password" id="hfTok" placeholder="hf_..."></label>
+    <label style="margin-top:14px"><input type="checkbox" id="voOn"> 🎙 AI voiceover on exported clips (needs HF token — a hype line is spoken over the clip)</label>
   </details>
 
   <div class="foot">LegendClips is a fan tool. Mobile Legends: Bang Bang © Moonton — this tool only processes your own recordings, locally.</div>
@@ -130,7 +145,92 @@ let duration = 0, samples = [], moments = [], fileName = "match";
 
 $("nClips").oninput = e => $("nClipsV").textContent = e.target.value;
 $("clipLen").oninput = e => $("clipLenV").textContent = e.target.value;
-$("file").onchange = e => { const f = e.target.files[0]; if (f) loadVideo(f); };
+$("hfTok").value = localStorage.lcTok || "";
+$("hfTok").onchange = e => localStorage.lcTok = e.target.value.trim();
+$("file").onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const eng = document.querySelector('input[name="eng"]:checked').value;
+  if (eng === "yolo") yoloProcess(f); else loadVideo(f);
+};
+
+// ---------- YOLO engine: the MLBB-trained Hugging Face Space ----------
+// frendyrachman/mlbb-ai-auto-clipper — YOLOv8n fine-tuned on MLBB gameplay
+// (kills/savages/etc). We upload the video, the Space detects + cuts, and we
+// unpack the returned highlights.zip right here on the phone.
+const SPACE = "frendyrachman/mlbb-ai-auto-clipper";
+async function yoloProcess(file) {
+  $("clips").innerHTML = ""; $("top").style.display = "none";
+  fileName = (file.name || "match").replace(/\.[^.]+$/, "");
+  const mb = (file.size / 1048576).toFixed(0);
+  setStat(`Uploading ${mb}MB to the MLBB AI Space… (free 2-vCPU hardware — a long match can take a while)`);
+  setBar(0.02);
+  try {
+    const { Client } = await import("https://cdn.jsdelivr.net/npm/@gradio/client@1.14.2/dist/index.min.js");
+    const tok = $("hfTok").value.trim();
+    const client = await Client.connect(SPACE, tok ? { hf_token: tok } : {});
+    const job = client.submit("/predict", { video: { video: file } });
+    let result = null;
+    for await (const msg of job) {
+      if (msg.type === "status") {
+        if (msg.position != null && msg.position > 0) setStat(`In queue: position ${msg.position}…`);
+        else if (msg.stage === "pending") setStat("The Space is working — detecting kills with YOLO…");
+        if (msg.progress_data?.length) setBar(0.1 + (msg.progress_data[0].index / (msg.progress_data[0].length || 1)) * 0.8);
+      }
+      if (msg.type === "data") { result = msg.data; }
+    }
+    if (!result) throw new Error("the Space returned nothing (it may be waking up — try again in a minute)");
+    const [statusText, zipInfo] = result;
+    setStat(statusText?.split("\n")[0] || "Done — downloading clips…");
+    setBar(0.92);
+    const zipUrl = zipInfo?.url ?? zipInfo?.path;
+    if (!zipUrl) throw new Error("no highlights file returned — the model may have found no events");
+    const zr = await fetch(zipUrl, tok ? { headers: { Authorization: "Bearer " + tok } } : {});
+    const zipBuf = new Uint8Array(await zr.arrayBuffer());
+    const { unzipSync } = await import("https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js");
+    const entries = unzipSync(zipBuf);
+    setBar(1);
+    renderYoloClips(entries);
+  } catch (err) {
+    setStat("YOLO Space failed: " + err.message + " — falling back to on-device analysis.");
+    loadVideo(file);
+  }
+}
+function renderYoloClips(entries) {
+  const names = Object.keys(entries).filter(n => n.endsWith(".mp4"));
+  if (!names.length) { setStat("The model found no highlight events in this match."); return; }
+  $("top").style.display = "flex";
+  $("foundLine").textContent = `YOLO found ${names.length} highlights 🤖`;
+  setStat("Done! These are final clips — preview and save.");
+  const box = $("clips"); box.innerHTML = "";
+  moments = [];
+  names.forEach((n, i) => {
+    const blob = new Blob([entries[n]], { type: "video/mp4" });
+    const url = URL.createObjectURL(blob);
+    const el = document.createElement("div");
+    el.className = "clip";
+    el.innerHTML = `
+      <div class="inf">
+        <div class="t">Highlight ${i + 1} <span class="score">🤖 YOLO</span></div>
+        <video src="${url}" controls playsinline preload="metadata"></video>
+        <div class="row"><button data-act="save" class="gold">💾 Save clip</button></div>
+      </div>`;
+    const m = { label: `Highlight ${i + 1}`, blob, el, yolo: true };
+    el.querySelector('[data-act="save"]').onclick = e => saveYolo(m, e.target);
+    box.appendChild(el);
+    moments.push(m);
+  });
+}
+async function saveYolo(m, btn) {
+  btn.disabled = true;
+  try {
+    if ($("voOn").checked && $("hfTok").value.trim()) { await exportWithVoiceover(m); return; }
+    const file = new File([m.blob], `${fileName}-${m.label.replace(/\s/g, "")}.mp4`, { type: "video/mp4" });
+    if (navigator.canShare?.({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: m.label }); return; } catch {}
+    }
+    downloadBlob(m.blob, file.name);
+  } finally { btn.disabled = false; }
+}
 
 function setStat(t) { $("stat").textContent = t; }
 function setBar(p) { $("bar").style.display = "block"; $("barFill").style.width = (p * 100).toFixed(1) + "%"; }
@@ -316,10 +416,13 @@ async function exportClip(m, btn) {
     const parts = [];
     rec.ondataavailable = e => e.data.size && parts.push(e.data);
     const stopped = new Promise(r => rec.onstop = r);
+    // AI voiceover (optional): fetched BEFORE recording so timing is clean
+    const vo = $("voOn").checked ? await makeVoiceover(m) : null;
     vid.muted = false; vid.currentTime = m.start;
     await new Promise(r => { const f = () => { vid.removeEventListener("seeked", f); r(); }; vid.addEventListener("seeked", f); });
     await vid.play();
     rec.start(500);
+    if (vo) { const s = audioCtx.createBufferSource(); s.buffer = vo; s.connect(audioDest); s.connect(audioCtx.destination); s.start(audioCtx.currentTime + 0.4); }
     let raf;
     const draw = () => {
       cx.drawImage(vid, 0, 0, W, H);
@@ -352,6 +455,63 @@ function downloadBlob(blob, name) {
 $("saveAll").onclick = async () => {
   for (const m of moments) await exportClip(m, m.el.querySelector('[data-act="save"]'));
 };
+
+// ---------- AI voiceover: hype line → HF TTS → mixed into the export ----------
+const HYPE = ["What a play!", "Absolutely legendary!", "They never saw it coming!", "Clip it and ship it!", "That is how legends are made!"];
+async function makeVoiceover(m) {
+  const tok = $("hfTok").value.trim();
+  if (!tok) return null;
+  const line = (m.caption ? m.caption.replace(/^🔥\s*/, "") + ". " : "") + HYPE[Math.floor(Math.random() * HYPE.length)];
+  try {
+    const r = await fetch("https://router.huggingface.co/hf-inference/models/facebook/mms-tts-eng", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + tok, "Content-Type": "application/json" },
+      body: JSON.stringify({ inputs: line }),
+    });
+    if (!r.ok) throw new Error("TTS " + r.status);
+    const buf = await r.arrayBuffer();
+    audioTap(); // ensure the context exists
+    return await audioCtx.decodeAudioData(buf);
+  } catch (e) { console.warn("voiceover skipped:", e.message); return null; }
+}
+// re-record a finished clip blob with the voiceover mixed on top
+async function exportWithVoiceover(m) {
+  const ov = $("exportOverlay"); ov.style.display = "grid";
+  $("exTitle").textContent = `Adding voiceover to ${m.label}…`;
+  try {
+    const vo = await makeVoiceover(m);
+    const tmp = document.createElement("video");
+    tmp.src = URL.createObjectURL(m.blob); tmp.playsInline = true;
+    await new Promise((res, rej) => { tmp.onloadedmetadata = res; tmp.onerror = rej; });
+    const W = Math.min(1280, tmp.videoWidth), H = Math.round(W * tmp.videoHeight / tmp.videoWidth);
+    const cv = document.createElement("canvas"); cv.width = W; cv.height = H;
+    const cx = cv.getContext("2d");
+    const stream = cv.captureStream(30);
+    audioTap();
+    const src = audioCtx.createMediaElementSource(tmp);
+    src.connect(audioDest); src.connect(audioCtx.destination);
+    audioDest.stream.getAudioTracks().forEach(tr => stream.addTrack(tr));
+    const mime = MediaRecorder.isTypeSupported("video/mp4") ? "video/mp4" : "video/webm";
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 6_000_000 });
+    const parts = []; rec.ondataavailable = e => e.data.size && parts.push(e.data);
+    const stopped = new Promise(r => rec.onstop = r);
+    await tmp.play(); rec.start(500);
+    if (vo) { const s = audioCtx.createBufferSource(); s.buffer = vo; s.connect(audioDest); s.connect(audioCtx.destination); s.start(audioCtx.currentTime + 0.4); }
+    const draw = () => {
+      cx.drawImage(tmp, 0, 0, W, H);
+      $("exFill").style.width = Math.min(100, tmp.currentTime / tmp.duration * 100) + "%";
+      if (!tmp.ended) requestAnimationFrame(draw); else rec.stop();
+    };
+    draw();
+    await stopped;
+    const blob = new Blob(parts, { type: mime });
+    const ext = mime.startsWith("video/mp4") ? "mp4" : "webm";
+    const file = new File([blob], `${fileName}-${m.label.replace(/\s/g, "")}-vo.${ext}`, { type: mime });
+    if (navigator.canShare?.({ files: [file] })) { try { await navigator.share({ files: [file], title: m.label }); } catch { downloadBlob(blob, file.name); } }
+    else downloadBlob(blob, file.name);
+  } catch (err) { alert("Voiceover export failed: " + err.message); }
+  finally { ov.style.display = "none"; }
+}
 
 // ---------- optional: Hugging Face vision re-rank ----------
 async function aiRerank() {
