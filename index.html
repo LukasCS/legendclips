@@ -164,27 +164,51 @@ async function yoloProcess(file) {
   const mb = (file.size / 1048576).toFixed(0);
   setStat(`Uploading ${mb}MB to the MLBB AI Space… (free 2-vCPU hardware — a long match can take a while)`);
   setBar(0.02);
+  const HOST = "https://frendyrachman-mlbb-ai-auto-clipper.hf.space";
   try {
-    const { Client } = await import("https://cdn.jsdelivr.net/npm/@gradio/client@1.14.2/dist/index.min.js");
-    const tok = $("hfTok").value.trim();
-    const client = await Client.connect(SPACE, tok ? { hf_token: tok } : {});
-    const job = client.submit("/predict", { video: { video: file } });
-    let result = null;
-    for await (const msg of job) {
-      if (msg.type === "status") {
-        if (msg.position != null && msg.position > 0) setStat(`In queue: position ${msg.position}…`);
-        else if (msg.stage === "pending") setStat("The Space is working — detecting kills with YOLO…");
-        if (msg.progress_data?.length) setBar(0.1 + (msg.progress_data[0].index / (msg.progress_data[0].length || 1)) * 0.8);
+    // raw gradio REST API with plain (uncredentialed) fetches — the official
+    // JS client sends credentialed requests this Space's CORS doesn't allow
+    const fd = new FormData(); fd.append("files", file, file.name || "match.mp4");
+    const up = await fetch(`${HOST}/gradio_api/upload`, { method: "POST", body: fd });
+    if (!up.ok) throw new Error("upload failed (" + up.status + ")");
+    const [serverPath] = await up.json();
+    setStat("Uploaded ✓ — the YOLO model is scanning your match (every 1.5s of gameplay)…");
+    setBar(0.25);
+    const call = await fetch(`${HOST}/gradio_api/call/predict`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data: [{ video: { path: serverPath, meta: { _type: "gradio.FileData" } }, subtitles: null }] }),
+    });
+    const { event_id } = await call.json();
+    if (!event_id) throw new Error("the Space rejected the job");
+    // stream the SSE result (a long match can take several minutes on 2 vCPUs)
+    const es = await fetch(`${HOST}/gradio_api/call/predict/${event_id}`);
+    const reader = es.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "", result = null, ticks = 0;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      setBar(Math.min(0.9, 0.25 + (++ticks) * 0.01));
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+        const ev = (chunk.match(/^event:\s*(\S+)/m) || [])[1];
+        const dat = (chunk.match(/^data:\s*(.+)/m) || [])[1];
+        if (ev === "error") throw new Error(dat || "Space error");
+        if (ev === "complete" && dat) result = JSON.parse(dat);
+        if (ev === "heartbeat") setStat("Still working… (free hardware, long matches take minutes)");
       }
-      if (msg.type === "data") { result = msg.data; }
+      if (result) break;
     }
     if (!result) throw new Error("the Space returned nothing (it may be waking up — try again in a minute)");
     const [statusText, zipInfo] = result;
     setStat(statusText?.split("\n")[0] || "Done — downloading clips…");
     setBar(0.92);
-    const zipUrl = zipInfo?.url ?? zipInfo?.path;
+    if (/\b0 highlights\b/.test(statusText || "")) { setStat("The YOLO model found no highlight events in this match. Try the ⚡ On-device engine, or check the recording shows the full game UI."); setBar(1); return; }
+    const zipUrl = zipInfo?.url ?? (zipInfo?.path ? `${HOST}/gradio_api/file=${zipInfo.path}` : null);
     if (!zipUrl) throw new Error("no highlights file returned — the model may have found no events");
-    const zr = await fetch(zipUrl, tok ? { headers: { Authorization: "Bearer " + tok } } : {});
+    const zr = await fetch(zipUrl);
     const zipBuf = new Uint8Array(await zr.arrayBuffer());
     const { unzipSync } = await import("https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js");
     const entries = unzipSync(zipBuf);
