@@ -1,0 +1,12 @@
+{
+  "name": "LegendClips",
+  "short_name": "LegendClips",
+  "description": "MLBB highlight cutter — finds the best moments in your match recordings, entirely on-device.",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [
+    { "src": "icon.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
